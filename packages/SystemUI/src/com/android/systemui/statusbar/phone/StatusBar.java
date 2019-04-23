@@ -74,6 +74,8 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.graphics.Point;
 import android.graphics.PointF;
 import android.graphics.PorterDuff;
@@ -104,6 +106,7 @@ import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.Trace;
+import android.os.ParcelFileDescriptor;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.VibrationEffect;
@@ -155,6 +158,7 @@ import com.android.internal.statusbar.StatusBarIcon;
 import com.android.internal.statusbar.ThemeAccentUtils;
 import com.android.internal.utils.ActionConstants;
 import com.android.internal.utils.ActionUtils;
+import com.android.internal.utils.ImageHelper;
 import com.android.internal.utils.PackageMonitor;
 import com.android.internal.utils.PackageMonitor.PackageChangedListener;
 import com.android.internal.utils.PackageMonitor.PackageState;
@@ -348,6 +352,12 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
             Settings.Secure.PIE_GRAVITY;
     private static final String USE_OLD_MOBILETYPE =
             "system:" + Settings.System.USE_OLD_MOBILETYPE;
+    private static final String DISPLAY_CUTOUT_MODE =
+            "system:" + Settings.System.DISPLAY_CUTOUT_MODE;
+    private static final String STOCK_STATUSBAR_IN_HIDE =
+            "system:" + Settings.System.STOCK_STATUSBAR_IN_HIDE;
+    private static final String LOCKSCREEN_ALBUMART_FILTER =
+            Settings.Secure.LOCKSCREEN_ALBUMART_FILTER;
 
     private static final String BANNER_ACTION_CANCEL =
             "com.android.systemui.statusbar.banner_action_cancel";
@@ -645,7 +655,6 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
 
     private VisualizerView mVisualizerView;
     private boolean mScreenOn;
-    private boolean mKeyguardShowingMedia;
     private boolean mShowMediaMetadata;
     private boolean mNavbarVisible;
 
@@ -770,6 +779,11 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
     private boolean mPieEnabled;
     private int mPieGravity;
 
+    private int mImmerseMode;
+    private boolean mStatusBarStock;
+
+    private int mAlbumArtFilter;
+
     @Override
     public void start() {
         mGroupManager = Dependency.get(NotificationGroupManager.class);
@@ -833,6 +847,9 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         tunerService.addTunable(this, PIE_STATE);
         tunerService.addTunable(this, PIE_GRAVITY);
         tunerService.addTunable(this, USE_OLD_MOBILETYPE);
+        tunerService.addTunable(this, DISPLAY_CUTOUT_MODE);
+        tunerService.addTunable(this, STOCK_STATUSBAR_IN_HIDE);
+        tunerService.addTunable(this, LOCKSCREEN_ALBUMART_FILTER);
 
         mPackageMonitor = new PackageMonitor();
         mPackageMonitor.register(mContext, mHandler);
@@ -1030,6 +1047,7 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
                     mStatusBarView.setBar(this);
                     mStatusBarView.setPanel(mNotificationPanel);
                     mStatusBarView.setScrimController(mScrimController);
+                    handleCutout(null);
 
                     // CollapsedStatusBarFragment re-inflated PhoneStatusBarView and both of
                     // mStatusBarView.mExpanded and mStatusBarView.mBouncerShowing are false.
@@ -1925,22 +1943,52 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
                 // might still be null
             }
             if (artworkBitmap != null) {
-                artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(), artworkBitmap);
+                switch (mAlbumArtFilter) {
+                    case 0:
+                    default:
+                        artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(), artworkBitmap);
+                        break;
+                    case 1:
+                        artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(),
+                            ImageHelper.toGrayscale(artworkBitmap));
+                        break;
+                    case 2:
+                        Drawable aw = new BitmapDrawable(mBackdropBack.getResources(), artworkBitmap);
+                        artworkDrawable = new BitmapDrawable(ImageHelper.getColoredBitmap(aw,
+                            mContext.getResources().getColor(R.color.fab_color)));
+                        break;
+                    case 3:
+                        artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(),
+                            ImageHelper.getBlurredImage(mContext, artworkBitmap, 7.0f));
+                        break;
+                    case 4:
+                        artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(),
+                            ImageHelper.getGrayscaleBlurredImage(mContext, artworkBitmap, 7.0f));
+                        break;
+                }
             }
         }
-        mKeyguardShowingMedia = artworkDrawable != null;
+
+        if (artworkDrawable == null) {
+            //Get wallpaper as bitmap
+            WallpaperManager manager = WallpaperManager.getInstance(mContext);
+            ParcelFileDescriptor pfd = manager.getWallpaperFile(WallpaperManager.FLAG_LOCK);
+
+            //Sometimes lock wallpaper maybe null as getWallpaperFile doesnt return builtin wallpaper
+            if (pfd == null)
+                pfd = manager.getWallpaperFile(WallpaperManager.FLAG_SYSTEM);
+            if (pfd != null) {
+                Bitmap lockWallpaper = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+                artworkDrawable = new BitmapDrawable(mBackdropBack.getResources(), lockWallpaper);
+            }
+        }
 
         boolean allowWhenShade = false;
-        if (ENABLE_LOCKSCREEN_WALLPAPER && artworkDrawable == null) {
-            Bitmap lockWallpaper = mLockscreenWallpaper.getBitmap();
-            if (lockWallpaper != null) {
-                artworkDrawable = new LockscreenWallpaper.WallpaperDrawable(
-                        mBackdropBack.getResources(), lockWallpaper);
-                // We're in the SHADE mode on the SIM screen - yet we still need to show
-                // the lockscreen wallpaper in that mode.
-                allowWhenShade = mStatusBarKeyguardViewManager != null
-                        && mStatusBarKeyguardViewManager.isShowing();
-            }
+        if (ENABLE_LOCKSCREEN_WALLPAPER && mLockscreenWallpaper.getBitmap() != null) {
+            // We're in the SHADE mode on the SIM screen - yet we still need to show
+            // the lockscreen wallpaper in that mode.
+            allowWhenShade = mStatusBarKeyguardViewManager != null
+                    && mStatusBarKeyguardViewManager.isShowing();
         }
 
         boolean hideBecauseOccluded = mStatusBarKeyguardViewManager != null
@@ -1953,7 +2001,7 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         }
 
         if (mVisualizerView != null) {
-            if (mKeyguardShowingMedia && artworkDrawable instanceof BitmapDrawable) {
+            if (hasArtwork && artworkDrawable instanceof BitmapDrawable) {
                 // always use current backdrop to color eq
                 mVisualizerView.setBitmap(((BitmapDrawable)artworkDrawable).getBitmap());
             } else {
@@ -3656,6 +3704,7 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
 
         mViewHierarchyManager.updateRowStates();
         mScreenPinningRequest.onConfigurationChanged();
+        handleCutout(newConfig);
 
        int rotation = mDisplay.getRotation();
         if (rotation != mOrientation) {
@@ -6423,6 +6472,24 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
                         TunerService.parseIntegerSwitch(newValue, false);
                 TelephonyIcons.updateIcons(mUseOldMobileType);
                 break;
+            case DISPLAY_CUTOUT_MODE:
+                mImmerseMode = 0;
+                try {
+                    mImmerseMode = Integer.valueOf(newValue);
+                } catch (NumberFormatException ex) {}
+                handleCutout(null);
+                break;
+            case STOCK_STATUSBAR_IN_HIDE:
+                mStatusBarStock =
+                        TunerService.parseIntegerSwitch(newValue, true);
+                handleCutout(null);
+                break;
+            case LOCKSCREEN_ALBUMART_FILTER:
+                mAlbumArtFilter = 0;
+                try {
+                    mAlbumArtFilter = Integer.valueOf(newValue);
+                } catch (NumberFormatException ex) {}
+                break;
             default:
                 break;
         }
@@ -6489,5 +6556,35 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
                 }
             }
          };
+    }
+
+    private void updateStatusBarColors(boolean enable) {
+        if (enable) {
+            if (mStatusBarView != null)
+                mStatusBarView.setBackgroundColor(0xFF000000);
+            if (mKeyguardStatusBar != null)
+                mKeyguardStatusBar.setBackgroundColor(0xFF000000);
+        } else {
+            if (mStatusBarView != null)
+                mStatusBarView.setBackgroundColor(Color.TRANSPARENT);
+            if (mKeyguardStatusBar != null)
+                mKeyguardStatusBar.setBackgroundColor(Color.TRANSPARENT);
+        }
+    }
+
+    private void handleCutout(Configuration newConfig) {
+        boolean immerseMode;
+        if (newConfig == null || newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
+            immerseMode = mImmerseMode == 1;
+        } else {
+            immerseMode = false;
+        }
+        updateStatusBarColors(immerseMode);
+
+        mUiOffloadThread.submit(() -> {
+            ThemeAccentUtils.setCutoutOverlay(mOverlayManager, mLockscreenUserManager.getCurrentUserId(), mImmerseMode == 2);
+            ThemeAccentUtils.setStatusBarStockOverlay(mOverlayManager, mLockscreenUserManager.getCurrentUserId(), 
+                  mImmerseMode == 2 && mStatusBarStock);
+        });
     }
 }

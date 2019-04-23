@@ -42,6 +42,7 @@ import android.content.pm.ResolveInfo;
 import android.content.res.Resources;
 import android.graphics.drawable.Drawable;
 import android.hardware.input.InputManager;
+import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.media.session.MediaSessionLegacyHelper;
@@ -56,12 +57,14 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.service.wallpaper.WallpaperService;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.Slog;
+import android.view.HapticFeedbackConstants;
 import android.view.IWindowManager;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -81,6 +84,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.android.internal.statusbar.IStatusBarService;
+import com.android.internal.util.ArrayUtils;
 import com.android.internal.utils.Config.ActionConfig;
 
 public class ActionHandler {
@@ -153,6 +157,11 @@ public class ActionHandler {
 
     private static final String ACTION_ONEHAND_TRIGGER_EVENT =
             "com.android.server.wm.onehand.intent.action.ONEHAND_TRIGGER_EVENT";
+
+    private static final AudioAttributes VIBRATION_ATTRIBUTES = new AudioAttributes.Builder()
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .build();
 
     // remove actions from here as they come back on deck
     static final Set<String> sDisabledActions = new HashSet<String>();
@@ -518,6 +527,81 @@ public class ActionHandler {
         StatusBarHelper.dispatchNavigationEditorResult(intent);
     }
 
+    public static boolean performHapticFeedback(Context context, int effectId) {
+        Vibrator mVibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
+        if (mVibrator == null || !mVibrator.hasVibrator()) {
+            return false;
+        }
+        final boolean hapticsDisabled = Settings.System.getIntForUser(context.getContentResolver(),
+                Settings.System.HAPTIC_FEEDBACK_ENABLED, 0, UserHandle.USER_CURRENT) == 0;
+        if (hapticsDisabled) {
+            return false;
+        }
+
+        VibrationEffect effect = getVibrationEffect(effectId, context);
+        if (effect == null) {
+            return false;
+        }
+
+        int owningUid = android.os.Process.myUid();
+        String owningPackage = context.getOpPackageName();
+        mVibrator.vibrate(owningUid, owningPackage, effect, VIBRATION_ATTRIBUTES);
+        return true;
+    }
+
+    private static VibrationEffect getVibrationEffect(int effectId, Context context) {
+        long[] pattern;
+        switch (effectId) {
+            case HapticFeedbackConstants.CLOCK_TICK:
+            case HapticFeedbackConstants.CONTEXT_CLICK:
+                return VibrationEffect.get(VibrationEffect.EFFECT_TICK);
+            case HapticFeedbackConstants.KEYBOARD_RELEASE:
+            case HapticFeedbackConstants.TEXT_HANDLE_MOVE:
+            case HapticFeedbackConstants.VIRTUAL_KEY_RELEASE:
+            case HapticFeedbackConstants.ENTRY_BUMP:
+            case HapticFeedbackConstants.DRAG_CROSSING:
+            case HapticFeedbackConstants.GESTURE_END:
+                return VibrationEffect.get(VibrationEffect.EFFECT_TICK, false);
+            case HapticFeedbackConstants.KEYBOARD_TAP: // == KEYBOARD_PRESS
+            case HapticFeedbackConstants.VIRTUAL_KEY:
+            case HapticFeedbackConstants.EDGE_RELEASE:
+            case HapticFeedbackConstants.CONFIRM:
+            case HapticFeedbackConstants.GESTURE_START:
+                return VibrationEffect.get(VibrationEffect.EFFECT_CLICK);
+            case HapticFeedbackConstants.LONG_PRESS:
+            case HapticFeedbackConstants.EDGE_SQUEEZE:
+                return VibrationEffect.get(VibrationEffect.EFFECT_HEAVY_CLICK);
+            case HapticFeedbackConstants.REJECT:
+                return VibrationEffect.get(VibrationEffect.EFFECT_DOUBLE_CLICK);
+
+            case HapticFeedbackConstants.CALENDAR_DATE:
+                pattern = getLongIntArray(context.getResources(),
+                    com.android.internal.R.array.config_calendarDateVibePattern);
+                break;
+            case HapticFeedbackConstants.SAFE_MODE_ENABLED:
+                pattern = getLongIntArray(context.getResources(),
+                    com.android.internal.R.array.config_safeModeEnabledVibePattern);
+                break;
+
+            default:
+                return null;
+        }
+        if (pattern.length == 0) {
+            // No vibration
+            return null;
+        } else if (pattern.length == 1) {
+            // One-shot vibration
+            return VibrationEffect.createOneShot(pattern[0], VibrationEffect.DEFAULT_AMPLITUDE);
+        } else {
+            // Pattern vibration
+            return VibrationEffect.createWaveform(pattern, -1);
+        }
+    }
+
+    static long[] getLongIntArray(Resources r, int resid) {
+        return ArrayUtils.convertToLongArray(r.getIntArray(resid));
+    }
+
     public static void performTask(Context context, String action) {
         // null: throw it out
         if (action == null) {
@@ -537,7 +621,9 @@ public class ActionHandler {
         } else if (action.equals(SYSTEMUI_TASK_NO_ACTION)) {
             return;
         } else if (action.equals(SYSTEMUI_TASK_KILL_PROCESS)) {
-            killProcess(context);
+            if (killProcess(context)) {
+                performHapticFeedback(context, HapticFeedbackConstants.LONG_PRESS);
+            }
             return;
         } else if (action.equals(SYSTEMUI_TASK_SCREENSHOT)) {
             sendCommandToWindowManager(new Intent(INTENT_SCREENSHOT));
@@ -649,10 +735,7 @@ public class ActionHandler {
             if (am != null && ActivityManagerNative.isSystemReady()) {
                 if (am.getRingerMode() != AudioManager.RINGER_MODE_VIBRATE) {
                     am.setRingerMode(AudioManager.RINGER_MODE_VIBRATE);
-                    Vibrator vib = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-                    if (vib != null) {
-                        vib.vibrate(50);
-                    }
+                    performHapticFeedback(context, HapticFeedbackConstants.VIRTUAL_KEY);
                 } else {
                     am.setRingerMode(AudioManager.RINGER_MODE_NORMAL);
                     ToneGenerator tg = new ToneGenerator(
@@ -685,10 +768,7 @@ public class ActionHandler {
             if (am != null && ActivityManagerNative.isSystemReady()) {
                 if (am.getRingerMode() == AudioManager.RINGER_MODE_NORMAL) {
                     am.setRingerMode(AudioManager.RINGER_MODE_VIBRATE);
-                    Vibrator vib = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-                    if (vib != null) {
-                        vib.vibrate(50);
-                    }
+                    performHapticFeedback(context, HapticFeedbackConstants.VIRTUAL_KEY);
                 } else if (am.getRingerMode() == AudioManager.RINGER_MODE_VIBRATE) {
                     am.setRingerMode(AudioManager.RINGER_MODE_SILENT);
                 } else {
@@ -956,118 +1036,83 @@ public class ActionHandler {
         }
     }
 
-    public static void killProcess(Context context) {
+    public static boolean killProcess(Context context) {
         if (context.checkCallingOrSelfPermission(
-                android.Manifest.permission.FORCE_STOP_PACKAGES) == PackageManager.PERMISSION_GRANTED
-                && !isLockTaskOn()) {
-            try {
-                PackageManager packageManager = context.getPackageManager();
-                final Intent intent = new Intent(Intent.ACTION_MAIN);
-                String defaultHomePackage = "com.android.launcher";
-                intent.addCategory(Intent.CATEGORY_HOME);
-                final ResolveInfo res = packageManager.resolveActivity(intent, 0);
-                if (res.activityInfo != null
-                        && !res.activityInfo.packageName.equals("android")) {
-                    defaultHomePackage = res.activityInfo.packageName;
-                }
+                android.Manifest.permission.FORCE_STOP_PACKAGES) != PackageManager.PERMISSION_GRANTED
+                || isLockTaskOn())
+            return false;
+        try {
+            final Intent intent = new Intent(Intent.ACTION_MAIN);
+            String defaultHomePackage = "com.android.launcher";
+            intent.addCategory(Intent.CATEGORY_HOME);
+            final ResolveInfo res = context.getPackageManager().resolveActivity(intent, 0);
 
-                // Use UsageStats to determine foreground app
-                UsageStatsManager usageStatsManager = (UsageStatsManager) context
-                        .getSystemService(Context.USAGE_STATS_SERVICE);
-                long current = System.currentTimeMillis();
-                long past = current - (1000 * 60 * 60); // uses snapshot of usage over past 60
-                                                        // minutes
-
-                // Get the list, then sort it chronilogically so most recent usage is at start of
-                // list
-                List<UsageStats> recentApps = usageStatsManager.queryUsageStats(
-                        UsageStatsManager.INTERVAL_DAILY, past, current);
-                Collections.sort(recentApps, new Comparator<UsageStats>() {
-                    @Override
-                    public int compare(UsageStats lhs, UsageStats rhs) {
-                        long timeLHS = lhs.getLastTimeUsed();
-                        long timeRHS = rhs.getLastTimeUsed();
-                        if (timeLHS > timeRHS) {
-                            return -1;
-                        } else if (timeLHS < timeRHS) {
-                            return 1;
-                        }
-                        return 0;
-                    }
-                });
-
-                IActivityManager iam = ActivityManagerNative.getDefault();
-                // this may not be needed due to !isLockTaskOn() in entry if
-                // if (am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) return;
-
-                // Look for most recent usagestat with lastevent == 1 and grab package name
-                // ...this seems to map to the UsageEvents.Event.MOVE_TO_FOREGROUND
-                String pkg = null;
-                for (int i = 0; i < recentApps.size(); i++) {
-                    UsageStats mostRecent = recentApps.get(i);
-                    if (mostRecent.mLastEvent == 1) {
-                        pkg = mostRecent.mPackageName;
-                        break;
-                    }
-                }
-
-                if (pkg != null && !pkg.equals("com.android.systemui")
-                        && !pkg.equals(defaultHomePackage) && !isPackageLiveWalls(context, pkg)) {
-
-                    // Restore home screen stack before killing the app
-                    Intent home = new Intent(Intent.ACTION_MAIN, null);
-                    home.addCategory(Intent.CATEGORY_HOME);
-                    home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                            | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-                    context.startActivity(home);
-
-                    // Kill the app
-                    iam.forceStopPackage(pkg, UserHandle.USER_CURRENT);
-
-                    // Remove killed app from Recents
-                    final ParceledListSlice<ActivityManager.RecentTaskInfo> recentTasks = iam
-                            .getRecentTasks(ActivityManager.getMaxRecentTasksStatic(),
-                                    ActivityManager.RECENT_IGNORE_UNAVAILABLE,
-                                    UserHandle.CURRENT.getIdentifier());
-                    List<ActivityManager.RecentTaskInfo> recentList = recentTasks.getList();
-                    final int size = recentList.size();
-                    for (int i = 0; i < size; i++) {
-                        ActivityManager.RecentTaskInfo recentInfo = recentList.get(i);
-                        if (recentInfo.baseIntent.getComponent().getPackageName().equals(pkg)) {
-                            int taskid = recentInfo.persistentId;
-                            iam.removeTask(taskid);
-                        }
-                    }
-
-                    String pkgName;
-                    try {
-                        pkgName = (String) packageManager.getApplicationLabel(
-                                packageManager.getApplicationInfo(pkg,
-                                        PackageManager.GET_META_DATA));
-                    } catch (PackageManager.NameNotFoundException e) {
-                        // Just use pkg if issues getting appName
-                        pkgName = pkg;
-                    }
-
-                    Resources systemUIRes = ActionUtils.getResourcesForPackage(context,
-                            ActionUtils.PACKAGE_SYSTEMUI);
-                    int ident = systemUIRes.getIdentifier("app_killed_message", ActionUtils.STRING,
-                            ActionUtils.PACKAGE_SYSTEMUI);
-                    String toastMsg = systemUIRes.getString(ident, pkgName);
-                    Context ctx = getPackageContext(context, ActionUtils.PACKAGE_SYSTEMUI);
-                    Toast.makeText(ctx != null ? ctx : context, toastMsg, Toast.LENGTH_SHORT)
-                            .show();
-                    return;
-                } else {
-                    // make a "didnt kill anything" toast?
-                    return;
-                }
-            } catch (RemoteException remoteException) {
-                Log.d("ActionHandler", "Caller cannot kill processes, aborting");
+            if (res.activityInfo != null && !res.activityInfo.packageName.equals("android")) {
+                defaultHomePackage = res.activityInfo.packageName;
             }
-        } else {
-            Log.d("ActionHandler", "Caller cannot kill processes, aborting");
+
+            IActivityManager am = ActivityManagerNative.getDefault();
+            List<ActivityManager.RunningAppProcessInfo> apps = am.getRunningAppProcesses();
+            for (ActivityManager.RunningAppProcessInfo appInfo : apps) {
+                int uid = appInfo.uid;
+                // Make sure it's a foreground user application (not system,
+                // root, phone, etc.)
+                if (uid >= Process.FIRST_APPLICATION_UID && uid <= Process.LAST_APPLICATION_UID
+                        && appInfo.importance ==
+                        ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                    if (appInfo.pkgList != null && (appInfo.pkgList.length > 0)) {
+                        for (String pkg : appInfo.pkgList) {
+                            if (!pkg.equals(ActionUtils.PACKAGE_SYSTEMUI)
+                                    && !pkg.equals(defaultHomePackage)) {
+                                am.forceStopPackage(pkg, UserHandle.USER_CURRENT);
+
+                                // Remove killed app from Recents
+                                final ParceledListSlice<ActivityManager.RecentTaskInfo> recentTasks = am
+                                        .getRecentTasks(ActivityManager.getMaxRecentTasksStatic(),
+                                                ActivityManager.RECENT_IGNORE_UNAVAILABLE,
+                                                UserHandle.CURRENT.getIdentifier());
+                                List<ActivityManager.RecentTaskInfo> recentList = recentTasks.getList();
+                                final int size = recentList.size();
+                                for (int i = 0; i < size; i++) {
+                                    ActivityManager.RecentTaskInfo recentInfo = recentList.get(i);
+                                    if (recentInfo.baseIntent.getComponent().getPackageName().equals(pkg)) {
+                                        int taskid = recentInfo.persistentId;
+                                        am.removeTask(taskid);
+                                    }
+                                }
+
+                                String pkgName;
+                                try {
+                                    PackageManager packageManager = context.getPackageManager();
+                                    pkgName = (String) packageManager.getApplicationLabel(
+                                        packageManager.getApplicationInfo(pkg,
+                                                PackageManager.GET_META_DATA));
+                                } catch (PackageManager.NameNotFoundException e) {
+                                    // Just use pkg if issues getting appName
+                                    pkgName = pkg;
+                                }
+
+                                Resources systemUIRes = ActionUtils.getResourcesForPackage(context,
+                                        ActionUtils.PACKAGE_SYSTEMUI);
+                                int ident = systemUIRes.getIdentifier("app_killed_message", ActionUtils.STRING,
+                                        ActionUtils.PACKAGE_SYSTEMUI);
+                                String toastMsg = systemUIRes.getString(ident, pkgName);
+                                Context ctx = getPackageContext(context, ActionUtils.PACKAGE_SYSTEMUI);
+                                Toast.makeText(ctx != null ? ctx : context, toastMsg, Toast.LENGTH_SHORT)
+                                        .show();
+                                return true;
+                            }
+                        }
+                    } else {
+                        Process.killProcess(appInfo.pid);
+                        return true;
+                    }
+                }
+            }
+        } catch (RemoteException remoteException) {
+            // Do nothing; just let it go.
         }
+        return false;
     }
 
     public static Context getPackageContext(Context context, String packageName) {

@@ -21,6 +21,7 @@ import static android.view.Surface.ROTATION_90;
 import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
 
 import static com.android.systemui.tuner.TunablePadding.FLAG_END;
 import static com.android.systemui.tuner.TunablePadding.FLAG_START;
@@ -43,6 +44,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.provider.Settings;
 import android.provider.Settings.Secure;
 import android.support.annotation.VisibleForTesting;
 import android.util.DisplayMetrics;
@@ -103,6 +105,10 @@ public class ScreenDecorations extends SystemUI implements Tunable {
     private DisplayCutoutView mCutoutBottom;
     private boolean mPendingRotationChange;
     private Handler mHandler;
+    private boolean mCutOutMode;
+
+    private static final String DISPLAY_CUTOUT_MODE =
+            "system:" + Settings.System.DISPLAY_CUTOUT_MODE;
 
     @Override
     public void start() {
@@ -125,6 +131,8 @@ public class ScreenDecorations extends SystemUI implements Tunable {
 
         Dependency.get(Dependency.MAIN_HANDLER).post(
                 () -> Dependency.get(TunerService.class).addTunable(this, SIZE));
+        Dependency.get(Dependency.MAIN_HANDLER).post(
+                () -> Dependency.get(TunerService.class).addTunable(this, DISPLAY_CUTOUT_MODE));
 
         if (hasRoundedCorners() || shouldDrawCutout()) {
             setupDecorations();
@@ -174,6 +182,12 @@ public class ScreenDecorations extends SystemUI implements Tunable {
     }
 
     private void setupDecorations() {
+        // Get rid of all views to redraw with new layout params
+        if (mOverlay != null)
+            mWindowManager.removeView(mOverlay);
+        if (mBottomOverlay != null)
+            mWindowManager.removeView(mBottomOverlay);
+
         mOverlay = LayoutInflater.from(mContext)
                 .inflate(R.layout.rounded_corners, null);
         mCutoutTop = new DisplayCutoutView(mContext, true,
@@ -259,6 +273,7 @@ public class ScreenDecorations extends SystemUI implements Tunable {
                 // the updated rotation).
                 updateLayoutParams();
             }
+            updateCutoutMode();
         });
     }
 
@@ -419,7 +434,10 @@ public class ScreenDecorations extends SystemUI implements Tunable {
         } else {
             lp.gravity = Gravity.TOP | Gravity.LEFT;
         }
-        lp.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        if (mCutOutMode)
+            lp.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
+        else
+            lp.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         if (isLandscape(mRotation)) {
             lp.width = WRAP_CONTENT;
             lp.height = MATCH_PARENT;
@@ -446,37 +464,66 @@ public class ScreenDecorations extends SystemUI implements Tunable {
 
     @Override
     public void onTuningChanged(String key, String newValue) {
-        mHandler.post(() -> {
-            if (SIZE.equals(key)) {
-                if (mOverlay == null) {
-                    if (TunerService.parseIntegerSwitch(newValue, false))
-                        setupDecorations();
-                    else
-                        return;
-                }
-                int size = mRoundedDefault;
-                int sizeTop = mRoundedDefaultTop;
-                int sizeBottom = mRoundedDefaultBottom;
-                if (newValue != null) {
-                    try {
-                        size = (int) (Integer.parseInt(newValue) * mDensity);
-                    } catch (Exception e) {
+        switch (key) {
+            case SIZE:
+                mHandler.post(() -> {
+                    if (mOverlay == null) {
+                        if (TunerService.parseIntegerSwitch(newValue, false))
+                            setupDecorations();
+                        else
+                            return;
                     }
-                }
+                    int size = mRoundedDefault;
+                    int sizeTop = mRoundedDefaultTop;
+                    int sizeBottom = mRoundedDefaultBottom;
+                    if (newValue != null) {
+                        try {
+                            size = (int) (Integer.parseInt(newValue) * mDensity);
+                        } catch (Exception e) {
+                        }
+                    }
 
-                if (sizeTop == 0) {
-                    sizeTop = size;
-                }
-                if (sizeBottom == 0) {
-                    sizeBottom = size;
-                }
-                updateWindowVisibilities();
-                setSize(mOverlay.findViewById(R.id.left), sizeTop);
-                setSize(mOverlay.findViewById(R.id.right), sizeTop);
-                setSize(mBottomOverlay.findViewById(R.id.left), sizeBottom);
-                setSize(mBottomOverlay.findViewById(R.id.right), sizeBottom);
-            }
-        });
+                    if (sizeTop == 0) {
+                        sizeTop = size;
+                    }
+                    if (sizeBottom == 0) {
+                        sizeBottom = size;
+                    }
+                    updateWindowVisibilities();
+                    setSize(mOverlay.findViewById(R.id.left), sizeTop);
+                    setSize(mOverlay.findViewById(R.id.right), sizeTop);
+                    setSize(mBottomOverlay.findViewById(R.id.left), sizeBottom);
+                    setSize(mBottomOverlay.findViewById(R.id.right), sizeBottom);
+                });
+                break;
+            case DISPLAY_CUTOUT_MODE:
+                mHandler.post(() -> {
+                    int immerseMode = 0;
+                    try {
+                        immerseMode = Integer.valueOf(newValue);
+                    } catch (NumberFormatException ex) {}
+                    mCutOutMode = immerseMode == 1;
+                    updateCutoutMode();
+                });
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void updateCutoutMode() {
+        boolean newImmerseMode;
+        if (mRotation == RotationUtils.ROTATION_LANDSCAPE ||
+                mRotation == RotationUtils.ROTATION_SEASCAPE)
+            newImmerseMode = false;
+        else
+            newImmerseMode = mCutOutMode;
+
+        if (mCutOutMode != newImmerseMode) {
+            mCutOutMode = newImmerseMode;
+            mHandler.removeCallbacksAndMessages(null);
+            mHandler.post(this::startOnScreenDecorationsThread);
+        }
     }
 
     private void setSize(View view, int pixelSize) {
