@@ -36,8 +36,8 @@ public class TunerActivity extends SettingsDrawerActivity implements
     private static final String TAG_TUNER = "tuner";
 
     protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
         Dependency.initDependencies(this);
+        super.onCreate(savedInstanceState);
 
         if (getFragmentManager().findFragmentByTag(TAG_TUNER) == null) {
             final String action = getIntent().getAction();
@@ -50,6 +50,8 @@ public class TunerActivity extends SettingsDrawerActivity implements
                 fragment = new PowerNotificationControlsFragment();
             } else if ("com.android.settings.action.STATUS_BAR_TUNER".equals(action)) {
                 fragment = new StatusBarTuner();
+            } else if ("com.android.settings.action.LOCK_SCREEN_TUNER".equals(action)) {
+                fragment = new LockscreenFragment();
             } else {
                 fragment = new TunerFragment();
             }
