@@ -222,6 +222,7 @@ import com.android.internal.policy.PhoneWindow;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.crdroid.Utils;
+import com.android.internal.util.omni.OmniSwitchConstants;
 import com.android.server.ExtconStateObserver;
 import com.android.server.ExtconUEventObserver;
 import com.android.server.GestureLauncherService;
@@ -271,7 +272,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     static final String TAG = "WindowManager";
     static final boolean localLOGV = false;
     static final boolean DEBUG = false;
-    static final boolean DEBUG_INPUT = false;
+    static boolean DEBUG_INPUT = false;
     static final boolean DEBUG_KEYGUARD = false;
     static final boolean DEBUG_SPLASH_SCREEN = false;
     static final boolean DEBUG_WAKEUP = false;
@@ -348,6 +349,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private static final String ACTION_TORCH_OFF =
             "com.android.server.policy.PhoneWindowManager.ACTION_TORCH_OFF";
+
+    // OmniSwitch
+    private boolean mOmniSwitchRecents;
 
     /**
      * Keyguard stuff
@@ -1001,6 +1005,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(Settings.System.getUriFor(
                     Settings.System.SCREENSHOT_TYPE), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.RECENTS_OMNI_SWITCH_ENABLED), false, this,
                     UserHandle.USER_ALL);
             updateSettings();
         }
@@ -2273,6 +2280,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mAccessibilityManager = (AccessibilityManager) context.getSystemService(
                 Context.ACCESSIBILITY_SERVICE);
 
+        boolean debugInputOverride = SystemProperties.getBoolean("debug.inputEvent", false);
+        DEBUG_INPUT = DEBUG_INPUT || debugInputOverride;
+
         // register for dock events
         IntentFilter filter = new IntentFilter();
         filter.addAction(UiModeManager.ACTION_ENTER_CAR_MODE);
@@ -2620,6 +2630,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             mVolButtonScreenshotType = Settings.System.getIntForUser(resolver,
                     Settings.System.SCREENSHOT_TYPE, 0, UserHandle.USER_CURRENT);
 
+            mOmniSwitchRecents = Settings.System.getIntForUser(resolver,
+                    Settings.System.RECENTS_OMNI_SWITCH_ENABLED, 0,
+                    UserHandle.USER_CURRENT) == 1;
         }
         if (updateRotation) {
             updateRotation(true);
