@@ -199,6 +199,9 @@ public class VolumeDialogImpl implements VolumeDialog,
 
     private int mTimeOutDesired, mTimeOut;
 
+    // Volume dialog alpha
+    private int mVolumeDialogAlpha;
+
     public VolumeDialogImpl(Context context) {
         mContext =
                 new ContextThemeWrapper(context, R.style.qs_theme);
@@ -278,6 +281,8 @@ public class VolumeDialogImpl implements VolumeDialog,
         mDialogView.setAlpha(0);
         mDialogView.setLayoutDirection(mVolumePanelOnLeft ?
                 View.LAYOUT_DIRECTION_LTR : View.LAYOUT_DIRECTION_RTL);
+        mVolumeDialogAlpha = Settings.System.getInt(mContext.getContentResolver(),
+                    Settings.System.TRANSPARENT_VOLUME_DIALOG, 100);
 
         mDialogView.setOnHoverListener((v, event) -> {
             int action = event.getActionMasked();
@@ -897,7 +902,7 @@ public class VolumeDialogImpl implements VolumeDialog,
             }
             mDialogView.setAlpha(0);
             mDialogView.animate()
-                    .alpha(1)
+                    .alpha((float) mVolumeDialogAlpha / 100)
                     .translationX(0)
                     .setDuration(DIALOG_SHOW_ANIMATION_DURATION)
                     .setInterpolator(new SystemUIInterpolators.LogDecelerateInterpolator())
@@ -971,7 +976,9 @@ public class VolumeDialogImpl implements VolumeDialog,
             Events.writeEvent(mContext, Events.EVENT_DISMISS_DIALOG, reason);
         }
         mDialogView.setTranslationX(0);
-        mDialogView.setAlpha(1);
+        mVolumeDialogAlpha = Settings.System.getInt(mContext.getContentResolver(),
+                    Settings.System.TRANSPARENT_VOLUME_DIALOG, 100);
+        mDialogView.setAlpha((float) mVolumeDialogAlpha / 100);
         ViewPropertyAnimator animator = mDialogView.animate()
                 .alpha(0)
                 .setDuration(DIALOG_HIDE_ANIMATION_DURATION)
